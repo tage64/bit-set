@@ -59,12 +59,17 @@ extern crate serde;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
-use bit_vec::{BitBlock, BitVec, Blocks};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use bit_vec::{BitBlock, BitVec, Blocks, Storage};
 use core::cmp;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash;
 use core::iter::{self, Chain, Enumerate, FromIterator, Repeat, Skip, Take};
+use core::ops::{BitAnd, BitOr, BitXor};
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 type MatchWords<'a, B> = Chain<Enumerate<Blocks<'a, B>>, Skip<Take<Enumerate<Repeat<B>>>>>;
 
@@ -88,41 +93,47 @@ fn blocks_for_bits<B: BitBlock>(bits: usize) -> usize {
 #[allow(clippy::iter_skip_zero)]
 // Take two BitVec's, and return iterators of their words, where the shorter one
 // has been padded with 0's
-fn match_words<'a, 'b, B: BitBlock>(
-    a: &'a BitVec<B>,
-    b: &'b BitVec<B>,
-) -> (MatchWords<'a, B>, MatchWords<'b, B>) {
+fn match_words<'a, 'b, S: Storage>(
+    a: &'a BitVec<S>,
+    b: &'b BitVec<S>,
+) -> (MatchWords<'a, S::B>, MatchWords<'b, S::B>) {
     let a_len = a.storage().len();
     let b_len = b.storage().len();
 
     // have to uselessly pretend to pad the longer one for type matching
     if a_len < b_len {
         (
-            a.blocks()
-                .enumerate()
-                .chain(iter::repeat(B::zero()).enumerate().take(b_len).skip(a_len)),
+            a.blocks().enumerate().chain(
+                iter::repeat(S::B::zero())
+                    .enumerate()
+                    .take(b_len)
+                    .skip(a_len),
+            ),
             b.blocks()
                 .enumerate()
-                .chain(iter::repeat(B::zero()).enumerate().take(0).skip(0)),
+                .chain(iter::repeat(S::B::zero()).enumerate().take(0).skip(0)),
         )
     } else {
         (
             a.blocks()
                 .enumerate()
-                .chain(iter::repeat(B::zero()).enumerate().take(0).skip(0)),
-            b.blocks()
-                .enumerate()
-                .chain(iter::repeat(B::zero()).enumerate().take(a_len).skip(b_len)),
+                .chain(iter::repeat(S::B::zero()).enumerate().take(0).skip(0)),
+            b.blocks().enumerate().chain(
+                iter::repeat(S::B::zero())
+                    .enumerate()
+                    .take(a_len)
+                    .skip(b_len),
+            ),
         )
     }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct BitSet<B = u32> {
-    bit_vec: BitVec<B>,
+pub struct BitSet<S = Vec<u32>> {
+    bit_vec: BitVec<S>,
 }
 
-impl<B: BitBlock> Clone for BitSet<B> {
+impl<S: Storage> Clone for BitSet<S> {
     fn clone(&self) -> Self {
         BitSet {
             bit_vec: self.bit_vec.clone(),
@@ -134,7 +145,7 @@ impl<B: BitBlock> Clone for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> Default for BitSet<B> {
+impl<S: Storage + Default> Default for BitSet<S> {
     #[inline]
     fn default() -> Self {
         BitSet {
@@ -143,7 +154,7 @@ impl<B: BitBlock> Default for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> FromIterator<usize> for BitSet<B> {
+impl<S: Storage + Default> FromIterator<usize> for BitSet<S> {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         let mut ret = Self::default();
         ret.extend(iter);
@@ -151,7 +162,7 @@ impl<B: BitBlock> FromIterator<usize> for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> Extend<usize> for BitSet<B> {
+impl<S: Storage> Extend<usize> for BitSet<S> {
     #[inline]
     fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
         for i in iter {
@@ -160,30 +171,30 @@ impl<B: BitBlock> Extend<usize> for BitSet<B> {
     }
 }
 
-impl<B: BitBlock> PartialOrd for BitSet<B> {
+impl<S: Storage> PartialOrd for BitSet<S> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<B: BitBlock> Ord for BitSet<B> {
+impl<S: Storage> Ord for BitSet<S> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other)
     }
 }
 
-impl<B: BitBlock> PartialEq for BitSet<B> {
+impl<S: Storage> PartialEq for BitSet<S> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.iter().eq(other)
     }
 }
 
-impl<B: BitBlock> Eq for BitSet<B> {}
+impl<S: Storage> Eq for BitSet<S> {}
 
-impl BitSet<u32> {
+impl BitSet<Vec<u32>> {
     /// Creates a new empty `BitSet`.
     ///
     /// # Examples
@@ -215,6 +226,19 @@ impl BitSet<u32> {
         Self::from_bit_vec(bit_vec)
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        BitSet {
+            bit_vec: BitVec::from_bytes(bytes),
+        }
+    }
+}
+
+impl<S: Storage> BitSet<S> {
+    /// Create a new BitSet with a given storage. The storage must be empty.
+    pub fn with_storage(storage: S) -> Self {
+        Self::from_bit_vec(BitVec::with_storage(storage))
+    }
+
     /// Creates a new `BitSet` from the given bit vector.
     ///
     /// # Examples
@@ -237,18 +261,9 @@ impl BitSet<u32> {
     /// }
     /// ```
     #[inline]
-    pub fn from_bit_vec(bit_vec: BitVec) -> Self {
+    pub fn from_bit_vec(bit_vec: BitVec<S>) -> Self {
         BitSet { bit_vec }
     }
-
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        BitSet {
-            bit_vec: BitVec::from_bytes(bytes),
-        }
-    }
-}
-
-impl<B: BitBlock> BitSet<B> {
     /// Returns the capacity in bits for this bit vector. Inserting any
     /// element less than this amount will not trigger a resizing.
     ///
@@ -329,7 +344,7 @@ impl<B: BitBlock> BitSet<B> {
     /// assert!(bv[3]);
     /// ```
     #[inline]
-    pub fn into_bit_vec(self) -> BitVec<B> {
+    pub fn into_bit_vec(self) -> BitVec<S> {
         self.bit_vec
     }
 
@@ -347,7 +362,7 @@ impl<B: BitBlock> BitSet<B> {
     /// assert_eq!(bv[0], true);
     /// ```
     #[inline]
-    pub fn get_ref(&self) -> &BitVec<B> {
+    pub fn get_ref(&self) -> &BitVec<S> {
         &self.bit_vec
     }
 
@@ -372,14 +387,14 @@ impl<B: BitBlock> BitSet<B> {
     /// assert!(set.contains(3));
     /// ```
     #[inline]
-    pub fn get_mut(&mut self) -> &mut BitVec<B> {
+    pub fn get_mut(&mut self) -> &mut BitVec<S> {
         &mut self.bit_vec
     }
 
     #[inline]
     fn other_op<F>(&mut self, other: &Self, mut f: F)
     where
-        F: FnMut(B, B) -> B,
+        F: FnMut(S::B, S::B) -> S::B,
     {
         // Unwrap BitVecs
         let self_bit_vec = &mut self.bit_vec;
@@ -438,13 +453,13 @@ impl<B: BitBlock> BitSet<B> {
             .storage()
             .iter()
             .rev()
-            .take_while(|&&n| n == B::zero())
+            .take_while(|&&n| n == S::B::zero())
             .count();
         // Truncate away all empty trailing blocks, then shrink_to_fit
         let trunc_len = old_len - n;
         unsafe {
             bit_vec.storage_mut().truncate(trunc_len);
-            bit_vec.set_len(trunc_len * B::bits());
+            bit_vec.set_len(trunc_len * S::B::bits());
         }
         bit_vec.shrink_to_fit();
     }
@@ -464,7 +479,7 @@ impl<B: BitBlock> BitSet<B> {
     /// }
     /// ```
     #[inline]
-    pub fn iter(&self) -> Iter<B> {
+    pub fn iter(&self) -> Iter<S::B> {
         Iter(BlockIter::from_blocks(self.bit_vec.blocks()))
     }
 
@@ -487,15 +502,11 @@ impl<B: BitBlock> BitSet<B> {
     ///
     /// [`union_with`]: Self::union_with
     #[inline]
-    pub fn union<'a>(&'a self, other: &'a Self) -> Union<'a, B> {
-        fn or<B: BitBlock>(w1: B, w2: B) -> B {
-            w1 | w2
-        }
-
+    pub fn union<'a>(&'a self, other: &'a Self) -> Union<'a, S::B> {
         Union(BlockIter::from_blocks(TwoBitPositions {
             set: self.bit_vec.blocks(),
             other: other.bit_vec.blocks(),
-            merge: or,
+            merge: BitOr::bitor,
         }))
     }
 
@@ -518,17 +529,14 @@ impl<B: BitBlock> BitSet<B> {
     ///
     /// [`intersect_with`]: Self::intersect_with
     #[inline]
-    pub fn intersection<'a>(&'a self, other: &'a Self) -> Intersection<'a, B> {
-        fn bitand<B: BitBlock>(w1: B, w2: B) -> B {
-            w1 & w2
-        }
+    pub fn intersection<'a>(&'a self, other: &'a Self) -> Intersection<'a, S::B> {
         let min = cmp::min(self.bit_vec.len(), other.bit_vec.len());
 
         Intersection {
             iter: BlockIter::from_blocks(TwoBitPositions {
                 set: self.bit_vec.blocks(),
                 other: other.bit_vec.blocks(),
-                merge: bitand,
+                merge: BitAnd::bitand,
             }),
             n: min,
         }
@@ -560,7 +568,7 @@ impl<B: BitBlock> BitSet<B> {
     ///
     /// [`difference_with`]: Self::difference_with
     #[inline]
-    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, B> {
+    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, S::B> {
         fn diff<B: BitBlock>(w1: B, w2: B) -> B {
             w1 & !w2
         }
@@ -591,15 +599,11 @@ impl<B: BitBlock> BitSet<B> {
     ///
     /// [`symmetric_difference_with`]: Self::symmetric_difference_with
     #[inline]
-    pub fn symmetric_difference<'a>(&'a self, other: &'a Self) -> SymmetricDifference<'a, B> {
-        fn bitxor<B: BitBlock>(w1: B, w2: B) -> B {
-            w1 ^ w2
-        }
-
+    pub fn symmetric_difference<'a>(&'a self, other: &'a Self) -> SymmetricDifference<'a, S::B> {
         SymmetricDifference(BlockIter::from_blocks(TwoBitPositions {
             set: self.bit_vec.blocks(),
             other: other.bit_vec.blocks(),
-            merge: bitxor,
+            merge: BitXor::bitxor,
         }))
     }
 
@@ -822,12 +826,12 @@ impl<B: BitBlock> BitSet<B> {
     pub fn is_subset(&self, other: &Self) -> bool {
         let self_bit_vec = &self.bit_vec;
         let other_bit_vec = &other.bit_vec;
-        let other_blocks = blocks_for_bits::<B>(other_bit_vec.len());
+        let other_blocks = blocks_for_bits::<S::B>(other_bit_vec.len());
 
         // Check that `self` intersect `other` is self
         self_bit_vec.blocks().zip(other_bit_vec.blocks()).all(|(w1, w2)| w1 & w2 == w1) &&
         // Make sure if `self` has any more blocks than `other`, they're all 0
-        self_bit_vec.blocks().skip(other_blocks).all(|w| w == B::zero())
+        self_bit_vec.blocks().skip(other_blocks).all(|w| w == S::B::zero())
     }
 
     /// Returns `true` if the set is a superset of another.
@@ -871,13 +875,13 @@ impl<B: BitBlock> BitSet<B> {
     }
 }
 
-impl<B: BitBlock> fmt::Debug for BitSet<B> {
+impl<S: Storage> fmt::Debug for BitSet<S> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_set().entries(self).finish()
     }
 }
 
-impl<B: BitBlock> hash::Hash for BitSet<B> {
+impl<S: Storage> hash::Hash for BitSet<S> {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         for pos in self {
             pos.hash(state);
@@ -1093,11 +1097,11 @@ impl<'a, B: BitBlock> Iterator for SymmetricDifference<'a, B> {
     }
 }
 
-impl<'a, B: BitBlock> IntoIterator for &'a BitSet<B> {
+impl<'a, S: Storage> IntoIterator for &'a BitSet<S> {
     type Item = usize;
-    type IntoIter = Iter<'a, B>;
+    type IntoIter = Iter<'a, S::B>;
 
-    fn into_iter(self) -> Iter<'a, B> {
+    fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
